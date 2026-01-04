@@ -394,31 +394,6 @@ Press 'e' to edit | [SHOWN] (V to toggle)
 - Performance impact: Negligible (<1ms per operation)
 - Files modified: `claude_code_config/tui.py`
 
-### Bug Fixes
-
-**Conversation Count Display Consistency**
-- Fixed: Conversation counts showed as 0 in project labels and detail panel
-- Root cause: Code read from `.claude.json` (always empty) instead of filesystem
-- Solution: Updated project label and detail panel to use real filesystem data via `ConversationScanner`
-- Impact: All UI elements now show consistent, accurate conversation counts
-
-**Headers Field in Edit Dialog**
-- Fixed: HTTP/SSE server headers weren't visible when editing servers
-- Root cause: Edit form only showed environment variables (for stdio servers)
-- Solution: Added separate "Headers" input field to ServerFormScreen
-- Impact: Can now properly edit headers for HTTP/SSE servers like `context7`
-
-**Form Scrolling**
-- Fixed: ServerFormScreen wasn't scrollable, couldn't see all fields
-- Solution: Wrapped form content in `VerticalScroll` widget with fixed height
-- Impact: Users can now scroll to see all fields and buttons
-
-**Delete Conversation KeyError**
-- Fixed: Clicking delete on conversation crashed with `KeyError: 'id'`
-- Root cause: Delete dialog accessed wrong field in node_data
-- Solution: Updated to access `conv_file` object with fallback for old format
-- Impact: Delete conversation feature now works without crashes, shows conversation title in dialog
-
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
