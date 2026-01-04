@@ -19,7 +19,9 @@ from textual.widgets import (
 )
 
 from .config import ConfigManager
+from .error_log import ErrorLog
 from .models import McpServer, Project
+from .undo import UndoManager
 
 
 class ConfirmDialog(ModalScreen[bool]):
@@ -102,10 +104,14 @@ class ServerFormScreen(ModalScreen[Optional[tuple[McpServer, str]]]):
 
     ServerFormScreen > Container {
         width: 80;
-        height: auto;
-        max-height: 90%;
+        height: 90%;
         border: thick $background 80%;
         background: $surface;
+    }
+
+    ServerFormScreen VerticalScroll {
+        width: 100%;
+        height: 100%;
         padding: 1 2;
     }
 
@@ -139,7 +145,7 @@ class ServerFormScreen(ModalScreen[Optional[tuple[McpServer, str]]]):
         self,
         server: Optional[McpServer] = None,
         current_scope: str = "global",
-        available_projects: list[str] = None,
+        available_projects: Optional[list[str]] = None,
     ):
         super().__init__()
         self.server = server
@@ -148,74 +154,84 @@ class ServerFormScreen(ModalScreen[Optional[tuple[McpServer, str]]]):
 
     def compose(self) -> ComposeResult:
         with Container():
-            yield Label("Server Name:")
-            yield Input(
-                value=self.server.name if self.server else "",
-                placeholder="e.g., my-mcp-server",
-                id="name",
-            )
-
-            yield Label("Scope:")
-            scope_options = [("Global", "global")] + [
-                (Path(p).name, p) for p in self.available_projects
-            ]
-
-            # Create Select without initial value if empty list
-            if scope_options:
-                yield Select(
-                    options=scope_options,
-                    value=self.current_scope,
-                    id="scope",
-                    allow_blank=False,
-                )
-            else:
-                yield Select(
-                    options=[("Global", "global")],
-                    value="global",
-                    id="scope",
-                    allow_blank=False,
+            with VerticalScroll():
+                yield Label("Server Name:")
+                yield Input(
+                    value=self.server.name if self.server else "",
+                    placeholder="e.g., my-mcp-server",
+                    id="name",
                 )
 
-            yield Label("Type (leave empty for stdio):")
-            yield Input(
-                value=self.server.type if self.server and self.server.type else "",
-                placeholder="stdio, http, or sse",
-                id="type",
-            )
+                yield Label("Scope:")
+                scope_options = [("Global", "global")] + [
+                    (Path(p).name, p) for p in self.available_projects
+                ]
 
-            yield Label("Command (for stdio):")
-            yield Input(
-                value=self.server.command if self.server and self.server.command else "",
-                placeholder="/path/to/server or npx server",
-                id="command",
-            )
+                # Create Select without initial value if empty list
+                if scope_options:
+                    yield Select(
+                        options=scope_options,
+                        value=self.current_scope,
+                        id="scope",
+                        allow_blank=False,
+                    )
+                else:
+                    yield Select(
+                        options=[("Global", "global")],
+                        value="global",
+                        id="scope",
+                        allow_blank=False,
+                    )
 
-            yield Label("Args (comma-separated):")
-            yield Input(
-                value=", ".join(self.server.args) if self.server else "",
-                placeholder="arg1, arg2, arg3",
-                id="args",
-            )
+                yield Label("Type (leave empty for stdio):")
+                yield Input(
+                    value=self.server.type if self.server and self.server.type else "",
+                    placeholder="stdio, http, or sse",
+                    id="type",
+                )
 
-            yield Label("URL (for http/sse):")
-            yield Input(
-                value=self.server.url if self.server and self.server.url else "",
-                placeholder="https://api.example.com/mcp",
-                id="url",
-            )
+                yield Label("Command (for stdio):")
+                yield Input(
+                    value=self.server.command if self.server and self.server.command else "",
+                    placeholder="/path/to/server or npx server",
+                    id="command",
+                )
 
-            yield Label("Environment Variables (key=value, comma-separated):")
-            yield Input(
-                value=", ".join(f"{k}={v}" for k, v in self.server.env.items())
-                if self.server
-                else "",
-                placeholder="API_KEY=${API_KEY}, DEBUG=true",
-                id="env",
-            )
+                yield Label("Args (comma-separated):")
+                yield Input(
+                    value=", ".join(self.server.args) if self.server else "",
+                    placeholder="arg1, arg2, arg3",
+                    id="args",
+                )
 
-            with Horizontal():
-                yield Button("Save", variant="primary", id="save")
-                yield Button("Cancel", variant="default", id="cancel")
+                yield Label("URL (for http/sse):")
+                yield Input(
+                    value=self.server.url if self.server and self.server.url else "",
+                    placeholder="https://api.example.com/mcp",
+                    id="url",
+                )
+
+                yield Label("Environment Variables (key=value, comma-separated) - for stdio:")
+                yield Input(
+                    value=", ".join(f"{k}={v}" for k, v in self.server.env.items())
+                    if self.server
+                    else "",
+                    placeholder="API_KEY=${API_KEY}, DEBUG=true",
+                    id="env",
+                )
+
+                yield Label("Headers (key=value, comma-separated) - for http/sse:")
+                yield Input(
+                    value=", ".join(f"{k}={v}" for k, v in self.server.headers.items())
+                    if self.server
+                    else "",
+                    placeholder="Authorization=Bearer ${TOKEN}, Content-Type=application/json",
+                    id="headers",
+                )
+
+                with Horizontal():
+                    yield Button("Save", variant="primary", id="save")
+                    yield Button("Cancel", variant="default", id="cancel")
 
     def on_mount(self) -> None:
         """Set focus to the name input when mounted."""
@@ -238,6 +254,7 @@ class ServerFormScreen(ModalScreen[Optional[tuple[McpServer, str]]]):
         args_input = self.query_one("#args", Input)
         url_input = self.query_one("#url", Input)
         env_input = self.query_one("#env", Input)
+        headers_input = self.query_one("#headers", Input)
 
         name = name_input.value.strip()
         if not name:
@@ -258,6 +275,14 @@ class ServerFormScreen(ModalScreen[Optional[tuple[McpServer, str]]]):
                     key, value = pair.split("=", 1)
                     env[key.strip()] = value.strip()
 
+        # Parse headers
+        headers = {}
+        if headers_input.value.strip():
+            for pair in headers_input.value.split(","):
+                if "=" in pair:
+                    key, value = pair.split("=", 1)
+                    headers[key.strip()] = value.strip()
+
         server_type = type_input.value.strip() or None
         command = command_input.value.strip() or None
         url = url_input.value.strip() or None
@@ -269,6 +294,7 @@ class ServerFormScreen(ModalScreen[Optional[tuple[McpServer, str]]]):
             args=args,
             env=env,
             url=url,
+            headers=headers,
         )
 
         self.dismiss((server, scope))
@@ -337,7 +363,7 @@ class HistoryFormScreen(ModalScreen[Optional[tuple[str, str]]]):
         self,
         current_content: str = "",
         current_project: str = "global",
-        available_projects: list[str] = None,
+        available_projects: Optional[list[str]] = None,
     ):
         super().__init__()
         self.current_content = current_content
@@ -699,6 +725,14 @@ class ClaudeConfigApp(App):
     Tree:focus {
         border: tall $accent;
     }
+    
+    #clipboard_status {
+        width: 100%;
+        height: 1;
+        background: $panel;
+        padding: 0 2;
+        text-align: center;
+    }
     """
 
     BINDINGS = [
@@ -710,23 +744,72 @@ class ClaudeConfigApp(App):
         ("p", "paste_item", "Paste"),
         ("m", "move_server", "Move"),
         ("v", "view_pasted", "View Pasted"),
+        ("V", "toggle_mask", "Toggle Mask"),
         ("s", "save", "Save"),
         ("r", "reload", "Reload"),
         ("?", "help", "Help"),
         ("right", "expand_node", "Expand"),
         ("left", "collapse_node", "Collapse"),
+        ("ctrl+z", "undo", "Undo"),
+        ("ctrl+y", "redo", "Redo"),
+        ("u", "view_undo_history", "Undo History"),
+        ("l", "view_errors", "Error Log"),
+        ("x", "clear_clipboard", "Clear Clipboard"),
     ]
 
     def __init__(self, config_path: Optional[str] = None):
         super().__init__()
-        self.config_manager = ConfigManager(config_path)
+        self.config_manager = ConfigManager(Path(config_path) if config_path else None)
         self.modified = False
         self.selected_node_data = None
         self.copy_buffer = None  # Store copied items
         self.copy_buffer_type = None  # Track what type is in clipboard
+        
+        # Phase 1 additions - must be before calling methods that use them
+        self.base_title = "Claude Config Manager"
+        self.base_subtitle = "Manage your MCP servers and settings"
+        self.undo_manager = UndoManager(max_history=50)
+        self.error_log = ErrorLog(max_entries=100)
+        
+        # Security feature - mask sensitive values by default
+        self.mask_sensitive_values = True
+    
+    def mask_value(self, value: str) -> str:
+        """Mask a sensitive value with asterisks.
+        
+        Args:
+            value: The value to mask
+            
+        Returns:
+            Masked string (e.g., "****") or original value if masking is off
+        """
+        if self.mask_sensitive_values and value:
+            return "****"
+        return value
+    
+    def update_modified_indicators(self) -> None:
+        """Update all UI elements that show modification state."""
+        if self.modified:
+            self.title = f"{self.base_title} *"
+            self.sub_title = "⚠ Unsaved changes"
+        else:
+            self.title = self.base_title
+            self.sub_title = self.base_subtitle
+        
+        try:
+            save_btn = self.query_one("#btn_save", Button)
+            if self.modified:
+                save_btn.variant = "warning"
+                save_btn.label = "Save *"
+            else:
+                save_btn.variant = "success"
+                save_btn.label = "Save [s]"
+        except:
+            pass  # Button might not be mounted yet
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
+        yield Static("[dim]Clipboard: Empty[/dim]", id="clipboard_status")
         with Horizontal(id="main_container"):
             with Vertical(id="sidebar"):
                 with VerticalScroll(id="tree_container"):
@@ -754,11 +837,12 @@ class ClaudeConfigApp(App):
             tree = self.query_one("#config_tree", Tree)
             tree.focus()
 
-            global_count, project_count = self.config_manager.config.count_servers()
-            self.notify(
-                f"Loaded {global_count} global + {project_count} project servers",
-                severity="information",
-            )
+            if self.config_manager.config:
+                global_count, project_count = self.config_manager.config.count_servers()
+                self.notify(
+                    f"Loaded {global_count} global + {project_count} project servers",
+                    severity="information",
+                )
         except FileNotFoundError:
             self.notify(
                 f"Config file not found: {self.config_manager.config_path}",
@@ -796,7 +880,8 @@ class ClaudeConfigApp(App):
                 project = config.projects[path]
                 display_name = project.get_display_name()
                 server_count = len(project.mcp_servers)
-                conv_count = len(project.conversations)
+                real_conversations = self.config_manager.get_conversations(path)
+                conv_count = len(real_conversations)
                 history_count = len(project.history)
 
                 project_label = f"[bold yellow]📁 {display_name}[/bold yellow]"
@@ -827,17 +912,19 @@ class ClaudeConfigApp(App):
                             data={"type": "server", "scope": path, "name": name, "server": server}
                         )
 
-                # Add conversations
-                if project.conversations:
+                # Add conversations - load from filesystem, not config
+                real_conversations = self.config_manager.get_conversations(path)
+                if real_conversations:
                     convs_node = project_node.add(
-                        f"[magenta]Conversations ({len(project.conversations)})[/magenta]",
+                        f"[magenta]Conversations ({len(real_conversations)})[/magenta]",
                         data={"type": "conversations_container", "path": path}
                     )
-                    for conv_id, conv in sorted(project.conversations.items()):
-                        title = conv.get_title()[:40]
+                    for conv in real_conversations[:50]:  # Limit to 50 for performance
+                        title = conv.get_display_title(40)
+                        age = conv.get_age_str()
                         convs_node.add_leaf(
-                            f"💬 {title}",
-                            data={"type": "conversation", "path": path, "id": conv_id, "conv": conv}
+                            f"💬 {title} [dim]({age})[/dim]",
+                            data={"type": "conversation", "path": path, "conv_file": conv}
                         )
 
                 # Add history
@@ -896,27 +983,31 @@ class ClaudeConfigApp(App):
                 info.append("")
                 info.append("[bold cyan]Environment Variables:[/bold cyan]")
                 for key, value in server.env.items():
-                    info.append(f"  {key} = {value}")
+                    masked_value = self.mask_value(value)
+                    info.append(f"  {key} = {masked_value}")
 
             if server.headers:
                 info.append("")
                 info.append("[bold cyan]Headers:[/bold cyan]")
                 for key, value in server.headers.items():
-                    info.append(f"  {key} = {value}")
+                    masked_value = self.mask_value(value)
+                    info.append(f"  {key} = {masked_value}")
 
             info.append("")
-            info.append("[dim]Press 'e' to edit, 'd' to delete, 'c' to copy, 'p' to paste[/dim]")
+            mask_indicator = "[*****]" if self.mask_sensitive_values else "[SHOWN]"
+            info.append(f"[dim]Press 'e' to edit, 'd' to delete, 'c' to copy, 'p' to paste | {mask_indicator} (V)[/dim]")
             detail.update("\n".join(info))
 
         elif item_type == "project":
             project = node_data["project"]
             path = node_data["path"]
+            real_conversations = self.config_manager.get_conversations(path)
             info = [
                 f"[bold]Project: {project.get_display_name()}[/bold]",
                 f"[bold cyan]Path:[/bold cyan] {path}",
                 "",
                 f"[bold cyan]MCP Servers:[/bold cyan] {len(project.mcp_servers)}",
-                f"[bold cyan]Conversations:[/bold cyan] {len(project.conversations)}",
+                f"[bold cyan]Conversations:[/bold cyan] {len(real_conversations)}",
                 f"[bold cyan]History:[/bold cyan] {len(project.history)}",
                 "",
                 "[dim]Expand to see servers, conversations, and history[/dim]",
@@ -924,14 +1015,33 @@ class ClaudeConfigApp(App):
             detail.update("\n".join(info))
 
         elif item_type == "conversation":
-            conv = node_data["conv"]
-            info = [
-                f"[bold]Conversation[/bold]",
-                f"[bold cyan]ID:[/bold cyan] {conv.id}",
-                f"[bold cyan]Title:[/bold cyan] {conv.get_title()}",
-                "",
-                "[dim]Press 'd' to delete this conversation[/dim]",
-            ]
+            # Handle both old format (conv) and new format (conv_file)
+            if "conv_file" in node_data:
+                conv_file = node_data["conv_file"]
+                info = [
+                    f"[bold]Conversation[/bold]",
+                    "",
+                    f"[bold cyan]Title:[/bold cyan] {conv_file.title or 'Untitled'}",
+                    f"[bold cyan]ID:[/bold cyan] {conv_file.conversation_id}",
+                    f"[bold cyan]Messages:[/bold cyan] {conv_file.message_count}",
+                    f"[bold cyan]Size:[/bold cyan] {conv_file.get_size_str()}",
+                    f"[bold cyan]Age:[/bold cyan] {conv_file.get_age_str()}",
+                    "",
+                    f"[bold cyan]Location:[/bold cyan]",
+                    f"{conv_file.file_path}",
+                    "",
+                    "[dim]Press 'd' to delete this conversation[/dim]",
+                ]
+            else:
+                # Old format from .claude.json (shouldn't happen anymore)
+                conv = node_data["conv"]
+                info = [
+                    f"[bold]Conversation[/bold]",
+                    f"[bold cyan]ID:[/bold cyan] {conv.id}",
+                    f"[bold cyan]Title:[/bold cyan] {conv.get_title()}",
+                    "",
+                    "[dim]Press 'd' to delete this conversation[/dim]",
+                ]
             detail.update("\n".join(info))
 
         elif item_type == "history":
@@ -1077,20 +1187,29 @@ class ClaudeConfigApp(App):
             server_name = self.selected_node_data["name"]
             self.push_screen(
                 ConfirmDialog(f"Delete server '{server_name}'?", "Delete Server"),
-                lambda result: self.handle_delete_server(result)
+                lambda result: self.handle_delete_server(result if result is not None else False)
             )
         elif item_type == "conversation":
-            conv_id = self.selected_node_data["id"]
-            self.push_screen(
-                ConfirmDialog(f"Delete conversation?", "Delete Conversation"),
-                lambda result: self.handle_delete_conversation(result)
-            )
+            # Handle new format with conv_file
+            if "conv_file" in self.selected_node_data:
+                conv_file = self.selected_node_data["conv_file"]
+                title = conv_file.get_display_title(40)
+                self.push_screen(
+                    ConfirmDialog(f"Delete conversation '{title}'?", "Delete Conversation"),
+                    lambda result: self.handle_delete_conversation(result if result is not None else False)
+                )
+            else:
+                # Fallback for old .claude.json format (for safety)
+                self.push_screen(
+                    ConfirmDialog(f"Delete conversation?", "Delete Conversation"),
+                    lambda result: self.handle_delete_conversation(result if result is not None else False)
+                )
         elif item_type == "history":
             item = self.selected_node_data["item"]
             display_preview = item.get_short_display(40)
             self.push_screen(
                 ConfirmDialog(f"Delete history item?\n\n{display_preview}", "Delete History"),
-                lambda result: self.handle_delete_history(result)
+                lambda result: self.handle_delete_history(result if result is not None else False)
             )
         else:
             self.notify("Cannot delete this type of item", severity="warning")
@@ -1171,6 +1290,13 @@ class ClaudeConfigApp(App):
         if not confirmed or not self.selected_node_data:
             return
 
+        # Save undo snapshot before deleting
+        self.undo_manager.save_snapshot(
+            self.config_manager.config,
+            f"Delete server '{self.selected_node_data['name']}'",
+            self.selected_node_data
+        )
+
         scope = self.selected_node_data["scope"]
         name = self.selected_node_data["name"]
 
@@ -1183,6 +1309,7 @@ class ClaudeConfigApp(App):
 
         self.config_manager.mark_modified()
         self.modified = True
+        self.update_modified_indicators()
         self.refresh_tree()
         self.update_detail_panel(None)
         self.selected_node_data = None
@@ -1197,22 +1324,35 @@ class ClaudeConfigApp(App):
         if not confirmed or not self.selected_node_data:
             return
 
-        path = self.selected_node_data["path"]
-        conv_id = self.selected_node_data["id"]
+        # Handle new format (conv_file from filesystem)
+        if "conv_file" in self.selected_node_data:
+            conv_file = self.selected_node_data["conv_file"]
+            
+            # Delete the actual file
+            if conv_file.delete():
+                self.refresh_tree()
+                self.update_detail_panel(None)
+                self.selected_node_data = None
+                self.query_one("#config_tree", Tree).focus()
+                self.notify(f"✓ Conversation '{conv_file.get_display_title(40)}' deleted", severity="information")
+            else:
+                self.notify(f"✗ Failed to delete conversation file", severity="error")
+        else:
+            # Old format from .claude.json (fallback)
+            path = self.selected_node_data["path"]
+            conv_id = self.selected_node_data["id"]
 
-        project = self.config_manager.config.projects.get(path)
-        if project and conv_id in project.conversations:
-            del project.conversations[conv_id]
-            self.config_manager.mark_modified()
-            self.modified = True
-            self.refresh_tree()
-            self.update_detail_panel(None)
-            self.selected_node_data = None
-
-            # Refocus tree after deletion
-            self.query_one("#config_tree", Tree).focus()
-
-            self.notify(f"Conversation deleted", severity="information")
+            project = self.config_manager.config.projects.get(path)
+            if project and conv_id in project.conversations:
+                del project.conversations[conv_id]
+                self.config_manager.mark_modified()
+                self.modified = True
+                self.update_modified_indicators()
+                self.refresh_tree()
+                self.update_detail_panel(None)
+                self.selected_node_data = None
+                self.query_one("#config_tree", Tree).focus()
+                self.notify(f"Conversation deleted", severity="information")
 
     def handle_delete_history(self, confirmed: bool) -> None:
         """Handle history deletion confirmation."""
@@ -1421,7 +1561,21 @@ class ClaudeConfigApp(App):
             server = self.selected_node_data["server"]
             self.copy_buffer = server.copy()
             self.copy_buffer_type = "server"
-            self.notify(f"Copied server '{server.name}' to clipboard", severity="information")
+            # Update clipboard status with masked details
+            try:
+                clipboard_status = self.query_one("#clipboard_status", Static)
+                # Build detailed summary
+                details = []
+                if server.env:
+                    details.append(f"Env: {len(server.env)} vars")
+                if server.headers:
+                    details.append(f"Headers: {len(server.headers)} items")
+                
+                details_str = f" | {' | '.join(details)}" if details else ""
+                clipboard_status.update(f"[cyan]📋 Clipboard: Server '{server.name}'{details_str}[/cyan] (Press 'p' to paste, 'x' to clear)")
+            except:
+                pass
+            self.notify(f"✓ Copied server '{server.name}' to clipboard", severity="information")
         elif item_type == "history":
             item = self.selected_node_data["item"]
             # Copy the history item
@@ -1433,7 +1587,13 @@ class ClaudeConfigApp(App):
             )
             self.copy_buffer_type = "history"
             preview = item.get_short_display(30)
-            self.notify(f"Copied history item to clipboard: {preview}", severity="information")
+            # Update clipboard status
+            try:
+                clipboard_status = self.query_one("#clipboard_status", Static)
+                clipboard_status.update(f"[green]📋 Clipboard: History '{preview}'[/green] (Press 'p' to paste, 'x' to clear)")
+            except:
+                pass
+            self.notify(f"✓ Copied history item to clipboard", severity="information")
         else:
             self.notify("Can only copy servers and history items", severity="warning")
 
@@ -1533,7 +1693,7 @@ class ClaudeConfigApp(App):
         if self.modified:
             self.push_screen(
                 ConfirmDialog("You have unsaved changes. Reload anyway?", "Confirm Reload"),
-                lambda result: self.handle_reload_confirm(result)
+                lambda result: self.handle_reload_confirm(result if result is not None else False)
             )
         else:
             self.do_reload()
@@ -1551,6 +1711,8 @@ class ClaudeConfigApp(App):
         try:
             self.config_manager.load()
             self.modified = False
+            self.update_modified_indicators()
+            self.undo_manager.clear()
             self.selected_node_data = None
             self.refresh_tree()
             self.update_detail_panel(None)
@@ -1558,11 +1720,12 @@ class ClaudeConfigApp(App):
             # Refocus tree after reload
             self.query_one("#config_tree", Tree).focus()
 
-            global_count, project_count = self.config_manager.config.count_servers()
-            self.notify(
-                f"Reloaded {global_count} global + {project_count} project servers",
-                severity="information"
-            )
+            if self.config_manager.config:
+                global_count, project_count = self.config_manager.config.count_servers()
+                self.notify(
+                    f"Reloaded {global_count} global + {project_count} project servers",
+                    severity="information"
+                )
         except Exception as e:
             self.notify(f"Error reloading configuration: {e}", severity="error", timeout=10)
 
@@ -1576,12 +1739,21 @@ e - Edit selected item (servers, history)
 d - Delete selected item (servers, conversations, history)
 c - Copy item to clipboard (servers, history)
 p - Paste item from clipboard
+x - Clear clipboard
 m - Move server or history item
 v - View full pasted contents (for history items)
 s - Save changes
 r - Reload from disk
 q - Quit / Exit any dialog
 ? - Show this help
+
+[bold]Undo/Redo:[/bold] [green](NEW!)[/green]
+Ctrl+Z - Undo last action
+Ctrl+Y - Redo previously undone action
+u - View undo/redo history
+
+[bold]Error Management:[/bold] [green](NEW!)[/green]
+l - View error log (browse, export, clear)
 
 [bold]Tree Navigation:[/bold]
 ↑↓ - Navigate up/down
@@ -1600,6 +1772,9 @@ Ctrl+S - Save in forms
 [bold]Features:[/bold]
 • Manage MCP servers (global & project-level)
 • Copy-paste workflow for servers and history
+• Undo/redo system with 50-action history
+• Persistent error log viewer
+• Visual indicators for unsaved changes
 • Add, edit, and delete history items
 • View full pasted contents in detail
 • Move history between projects
@@ -1612,7 +1787,7 @@ Ctrl+S - Save in forms
         if self.modified:
             self.push_screen(
                 ConfirmDialog("You have unsaved changes. Quit anyway?", "Confirm Quit"),
-                lambda result: self.exit() if result else None
+                lambda result: self.exit() if (result if result is not None else False) else None
             )
         else:
             self.exit()
@@ -1645,3 +1820,270 @@ Ctrl+S - Save in forms
     @on(Button.Pressed, "#btn_save")
     def on_save_button(self) -> None:
         self.action_save()
+# This file contains all new methods to be added to ClaudeConfigApp
+# Copy these to the end of the tui.py file
+
+    def action_undo(self) -> None:
+        """Undo last action."""
+        from .models import ClaudeConfig
+        
+        if not self.undo_manager.can_undo():
+            self.notify("Nothing to undo", severity="information")
+            return
+        
+        snapshot = self.undo_manager.undo(
+            self.config_manager.config,
+            self.selected_node_data
+        )
+        
+        if not snapshot:
+            return
+        
+        # Restore config from snapshot
+        config_data = snapshot.config_state
+        self.config_manager._config = ClaudeConfig.from_dict(config_data)
+        
+        # Mark as modified
+        self.config_manager.mark_modified()
+        self.modified = True
+        self.update_modified_indicators()
+        
+        # Refresh UI
+        self.refresh_tree()
+        self.update_detail_panel(None)
+        self.selected_node_data = None
+        self.query_one("#config_tree", Tree).focus()
+        
+        self.notify(f"✓ Undone: {snapshot.description}", severity="information")
+
+    def action_redo(self) -> None:
+        """Redo previously undone action."""
+        from .models import ClaudeConfig
+        
+        if not self.undo_manager.can_redo():
+            self.notify("Nothing to redo", severity="information")
+            return
+        
+        snapshot = self.undo_manager.redo()
+        
+        if not snapshot:
+            return
+        
+        # Restore config from snapshot
+        config_data = snapshot.config_state
+        self.config_manager._config = ClaudeConfig.from_dict(config_data)
+        
+        # Mark as modified
+        self.config_manager.mark_modified()
+        self.modified = True
+        self.update_modified_indicators()
+        
+        # Refresh UI
+        self.refresh_tree()
+        self.update_detail_panel(None)
+        self.selected_node_data = None
+        self.query_one("#config_tree", Tree).focus()
+        
+        self.notify(f"✓ Redone: {snapshot.description}", severity="information")
+
+    def action_view_undo_history(self) -> None:
+        """Show undo/redo history viewer."""
+        class UndoHistoryScreen(ModalScreen[None]):
+            """Modal screen for viewing undo history."""
+            
+            DEFAULT_CSS = """
+            UndoHistoryScreen {
+                align: center middle;
+            }
+            
+            UndoHistoryScreen > Container {
+                width: 70;
+                height: auto;
+                max-height: 80%;
+                border: thick $background 80%;
+                background: $surface;
+                padding: 1 2;
+            }
+            """
+            
+            BINDINGS = [
+                ("escape", "close", "Close"),
+                ("q", "close", "Close"),
+            ]
+            
+            def __init__(self, undo_manager):
+                super().__init__()
+                self.undo_manager = undo_manager
+            
+            def compose(self) -> ComposeResult:
+                with Container():
+                    yield Label("[bold]Undo/Redo History[/bold]")
+                    yield Label("")
+                    
+                    if self.undo_manager.can_undo():
+                        yield Label("[bold cyan]Can Undo:[/bold cyan]")
+                        for action in self.undo_manager.get_undo_history():
+                            yield Label(f"  ← {action}")
+                    else:
+                        yield Label("[dim]No undo history[/dim]")
+                    
+                    yield Label("")
+                    
+                    if self.undo_manager.can_redo():
+                        yield Label("[bold green]Can Redo:[/bold green]")
+                        for action in self.undo_manager.get_redo_history():
+                            yield Label(f"  → {action}")
+                    else:
+                        yield Label("[dim]No redo history[/dim]")
+                    
+                    yield Label("")
+                    yield Label("[dim]Use Ctrl+Z to undo, Ctrl+Y to redo[/dim]")
+                    
+                    with Horizontal():
+                        yield Button("Close", variant="primary", id="close")
+            
+            @on(Button.Pressed, "#close")
+            def handle_close(self) -> None:
+                self.dismiss(None)
+            
+            def action_close(self) -> None:
+                self.dismiss(None)
+        
+        self.push_screen(UndoHistoryScreen(self.undo_manager))
+
+    def action_view_errors(self) -> None:
+        """Show error log viewer."""
+        from datetime import datetime
+        
+        class ErrorLogScreen(ModalScreen[None]):
+            """Modal screen for viewing error log."""
+            
+            DEFAULT_CSS = """
+            ErrorLogScreen {
+                align: center middle;
+            }
+            
+            ErrorLogScreen > Container {
+                width: 90%;
+                height: 90%;
+                border: thick $background 80%;
+                background: $surface;
+                padding: 1 2;
+            }
+            
+            ErrorLogScreen #error_list {
+                width: 35%;
+                height: 100%;
+                border-right: solid $primary;
+            }
+            
+            ErrorLogScreen #error_detail {
+                width: 65%;
+                height: 100%;
+                padding: 0 2;
+            }
+            """
+            
+            BINDINGS = [
+                ("escape", "close", "Close"),
+                ("q", "close", "Close"),
+                ("c", "clear_log", "Clear Log"),
+                ("e", "export_log", "Export"),
+            ]
+            
+            def __init__(self, error_log):
+                super().__init__()
+                self.error_log = error_log
+            
+            def compose(self) -> ComposeResult:
+                with Container():
+                    yield Label(f"[bold]Error Log ({len(self.error_log.entries)} entries)[/bold]")
+                    
+                    with Horizontal():
+                        with VerticalScroll(id="error_list"):
+                            if not self.error_log.entries:
+                                yield Label("[green]No errors logged[/green]")
+                            else:
+                                error_tree = Tree("Errors", id="error_tree")
+                                for entry in self.error_log.entries:
+                                    error_tree.root.add_leaf(
+                                        entry.format_short(),
+                                        data={"entry": entry}
+                                    )
+                                yield error_tree
+                        
+                        with VerticalScroll(id="error_detail"):
+                            yield Static("Select an error to view details", id="detail_content")
+                    
+                    with Horizontal():
+                        yield Button("Clear Log [c]", id="clear")
+                        yield Button("Export [e]", id="export")
+                        yield Button("Close [esc]", variant="primary", id="close")
+            
+            @on(Tree.NodeHighlighted)
+            def show_error_details(self, event: Tree.NodeHighlighted) -> None:
+                if event.node.data:
+                    entry = event.node.data["entry"]
+                    detail = self.query_one("#detail_content", Static)
+                    detail.update(entry.format_full())
+            
+            @on(Button.Pressed, "#clear")
+            def handle_clear(self) -> None:
+                self.action_clear_log()
+            
+            @on(Button.Pressed, "#export")
+            def handle_export(self) -> None:
+                self.action_export_log()
+            
+            @on(Button.Pressed, "#close")
+            def handle_close(self) -> None:
+                self.dismiss(None)
+            
+            def action_clear_log(self) -> None:
+                def do_clear(confirmed: Optional[bool]) -> None:
+                    if confirmed:
+                        self.error_log.clear()
+                        self.app.notify("Error log cleared", severity="information")
+                        self.dismiss(None)
+                
+                self.app.push_screen(
+                    ConfirmDialog("Clear all errors from log?", "Clear Log"),
+                    do_clear
+                )
+            
+            def action_export_log(self) -> None:
+                export_path = Path.home() / f"claude-config-errors-{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+                try:
+                    self.error_log.export_to_file(export_path)
+                    self.app.notify(f"✓ Exported errors to {export_path}", severity="information")
+                except Exception as e:
+                    self.app.notify(f"Export failed: {e}", severity="error")
+            
+            def action_close(self) -> None:
+                self.dismiss(None)
+        
+        self.push_screen(ErrorLogScreen(self.error_log))
+
+    def action_clear_clipboard(self) -> None:
+        """Clear the clipboard."""
+        if self.copy_buffer:
+            old_type = self.copy_buffer_type
+            self.copy_buffer = None
+            self.copy_buffer_type = None
+            self.notify(f"Clipboard cleared ({old_type})", severity="information")
+        else:
+            self.notify("Clipboard is already empty", severity="information")
+    
+    def action_toggle_mask(self) -> None:
+        """Toggle masking of sensitive values."""
+        self.mask_sensitive_values = not self.mask_sensitive_values
+        
+        # Refresh detail panel to show new state
+        if self.selected_node_data:
+            self.update_detail_panel(self.selected_node_data)
+        
+        # Notify user with appropriate icon and severity
+        if self.mask_sensitive_values:
+            self.notify("🔒 Sensitive values masked", severity="information")
+        else:
+            self.notify("👁 Sensitive values visible", severity="warning")

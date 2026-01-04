@@ -4,8 +4,9 @@ import json
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
 
+from .conversations import ConversationFile, ConversationScanner
 from .models import ClaudeConfig
 
 
@@ -25,6 +26,10 @@ class ConfigManager:
         self.backup_dir = self.config_path.parent / ".claude_backups"
         self._config: Optional[ClaudeConfig] = None
         self._modified = False
+        
+        # Initialize conversation scanner
+        claude_dir = Path.home() / ".claude"
+        self.conversation_scanner = ConversationScanner(claude_dir)
 
     def load(self) -> ClaudeConfig:
         """Load the configuration from file.
@@ -182,3 +187,30 @@ class ConfigManager:
     def mark_modified(self) -> None:
         """Mark configuration as modified."""
         self._modified = True
+    
+    def get_conversations(self, project_path: str) -> List[ConversationFile]:
+        """Get conversations for a specific project.
+        
+        Args:
+            project_path: Full path to the project
+            
+        Returns:
+            List of ConversationFile objects
+        """
+        return self.conversation_scanner.get_project_conversations(project_path)
+    
+    def get_all_conversations(self) -> Dict[str, List[ConversationFile]]:
+        """Get all conversations grouped by project.
+        
+        Returns:
+            Dict mapping project path to list of ConversationFile objects
+        """
+        return self.conversation_scanner.scan_all_conversations()
+    
+    def get_conversation_stats(self) -> Dict[str, int]:
+        """Get conversation statistics.
+        
+        Returns:
+            Dict with total_conversations, total_projects, total_size
+        """
+        return self.conversation_scanner.get_stats()
