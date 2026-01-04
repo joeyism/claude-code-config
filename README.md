@@ -2,6 +2,8 @@
 
 A modern Terminal User Interface (TUI) application for managing Claude Code configuration files (`~/.claude.json`). Simplify the management of MCP servers, projects, and conversations with an intuitive hierarchical interface.
 
+![Claude Code Config TUI](docs/Screenshot%20from%202026-01-04%2008-11-11.png)
+
 ## Features
 
 ### MCP Server Management
